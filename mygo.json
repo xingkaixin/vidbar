@@ -1,0 +1,9 @@
+{
+  "name": "Vidbar",
+  "identifier": "me.xingkaixin.vidbar",
+  "version": "0.1.0",
+  "out": "build",
+  "macos": {
+    "infoPlist": { "LSUIElement": true, "CFBundleDevelopmentRegion": "zh-Hans", "CFBundleLocalizations": ["zh-Hans"] }
+  }
+}

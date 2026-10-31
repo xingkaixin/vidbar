@@ -1,0 +1,14 @@
+[tools]
+go = "1.27.3"
+
+[tasks.dev]
+description = "Run the app with live reload"
+run = "go tool mygo dev"
+
+[tasks.test]
+description = "Check native UI lifetimes and run tests"
+run = ["go tool mygo vet .", "go test ./..."]
+
+[tasks.build]
+description = "Build the app bundle into build/"
+run = "go tool mygo build -skip-dmg"
