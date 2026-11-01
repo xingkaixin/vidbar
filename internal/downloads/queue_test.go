@@ -22,7 +22,7 @@ func open(t *testing.T, fetch fetchFunc) *Queue {
 func TestDownloadsRunOneAtATimeOldestFirst(t *testing.T) {
 	release := make(chan struct{})
 	started := make(chan string)
-	q := open(t, func(_ context.Context, url, _ string, _ func(ytdlp.Update)) (string, error) {
+	q := open(t, func(_ context.Context, url, _, _ string, _ func(ytdlp.Update)) (string, error) {
 		started <- url
 		<-release
 		return "", errors.New("gone")
@@ -41,7 +41,7 @@ func TestDownloadsRunOneAtATimeOldestFirst(t *testing.T) {
 
 func TestRemoveStopsTheRunningDownload(t *testing.T) {
 	started := make(chan struct{})
-	q := open(t, func(ctx context.Context, _, _ string, _ func(ytdlp.Update)) (string, error) {
+	q := open(t, func(ctx context.Context, _, _, _ string, _ func(ytdlp.Update)) (string, error) {
 		close(started)
 		<-ctx.Done()
 		return "", ctx.Err()
@@ -62,7 +62,7 @@ func TestFailedDownloadCanBeRetried(t *testing.T) {
 	}
 	attempts := 0
 	finished := make(chan struct{})
-	q := open(t, func(context.Context, string, string, func(ytdlp.Update)) (string, error) {
+	q := open(t, func(context.Context, string, string, string, func(ytdlp.Update)) (string, error) {
 		defer func() { finished <- struct{}{} }()
 		attempts++
 		if attempts == 1 {

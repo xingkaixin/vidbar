@@ -30,6 +30,19 @@ func TestReadFoldsMergedStreamsIntoOneProgress(t *testing.T) {
 	}
 }
 
+func TestReadCountsBytesAcrossStreams(t *testing.T) {
+	output := `{"title":"Clip","formats":"299+258","size":200}
+{"format":"299","done":150,"total":150,"speed":30}
+{"format":"258","done":25,"total":40,"speed":10}
+`
+	var last Update
+	read(strings.NewReader(output), func(u Update) { last = u })
+	want := Update{Title: "Clip", Fraction: 175.0 / 190, Done: 175, Total: 190, Speed: 10}
+	if last != want {
+		t.Errorf("update %+v, want %+v", last, want)
+	}
+}
+
 func TestFailurePrefersTheLastYtDlpError(t *testing.T) {
 	stderr := "WARNING: slow\nERROR: first\nERROR: Video unavailable\nWARNING: bye\n"
 	if got := failure(stderr, errors.New("exit status 1")).Error(); got != "Video unavailable" {

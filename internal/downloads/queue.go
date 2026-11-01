@@ -28,19 +28,26 @@ const (
 
 // Item is a download. Time is when it was added, then when it finished.
 type Item struct {
-	ID       string    `json:"id"`
-	URL      string    `json:"url"`
-	Title    string    `json:"title"`
-	Path     string    `json:"path,omitempty"`
-	Size     int64     `json:"size,omitempty"`
-	Status   Status    `json:"status"`
-	Error    string    `json:"error,omitempty"`
-	Time     time.Time `json:"time"`
+	ID     string    `json:"id"`
+	URL    string    `json:"url"`
+	Title  string    `json:"title"`
+	Path   string    `json:"path,omitempty"`
+	Size   int64     `json:"size,omitempty"`
+	Status Status    `json:"status"`
+	Error  string    `json:"error,omitempty"`
+	Time   time.Time `json:"time"`
+	// Thumbnail is the path of the preview, if the site has one.
+	Thumbnail string `json:"thumbnail,omitempty"`
+
 	Progress float64   `json:"-"`
+	Started  time.Time `json:"-"`
+	Done     int64     `json:"-"` // bytes so far
+	Total    int64     `json:"-"` // bytes in all, 0 until known
+	Speed    int64     `json:"-"` // bytes per second, 0 until known
 }
 
 // fetchFunc is the shape of ytdlp.Download.
-type fetchFunc func(ctx context.Context, url, dir string, update func(ytdlp.Update)) (string, error)
+type fetchFunc func(ctx context.Context, url, dir, thumbnail string, update func(ytdlp.Update)) (string, error)
 
 type saved struct {
 	Dir   string `json:"dir"`
@@ -74,7 +81,7 @@ func Open(path, defaultDir string, onChange func()) *Queue {
 	}
 	for i := range q.state.Items {
 		if it := &q.state.Items[i]; it.Status == Queued || it.Status == Running {
-			it.Status, it.Error = Failed, "下载被中断"
+			it.Status, it.Error = Failed, "Interrupted"
 		}
 	}
 	return q
@@ -133,7 +140,15 @@ func (q *Queue) Remove(id string) {
 			q.cancel()
 		}
 		q.state.Items = slices.Delete(q.state.Items, i, i+1)
+		if err := os.Remove(q.thumbnail(id)); err != nil && !os.IsNotExist(err) {
+			log.Printf("remove thumbnail: %v", err)
+		}
 	})
+}
+
+// thumbnail is where the preview of a download goes, beside the history.
+func (q *Queue) thumbnail(id string) string {
+	return filepath.Join(filepath.Dir(q.path), "thumbnails", id+".jpg")
 }
 
 // Close stops the worker and waits for its download to die. What was running
@@ -176,7 +191,7 @@ func (q *Queue) drain() {
 		if !ok {
 			return
 		}
-		path, err := q.fetch(ctx, it.URL, dir, func(u ytdlp.Update) { q.report(it.ID, u) })
+		path, err := q.fetch(ctx, it.URL, dir, q.thumbnail(it.ID), func(u ytdlp.Update) { q.report(it.ID, u) })
 		q.finish(it.ID, path, err)
 	}
 }
@@ -189,9 +204,10 @@ func (q *Queue) next() (context.Context, Item, string, bool) {
 		if it.Status == Queued && !q.closed {
 			var ctx context.Context
 			ctx, q.cancel = context.WithCancel(context.Background())
-			q.state.Items[i].Status = Running
-			q.state.Items[i].Progress = 0
-			return ctx, q.state.Items[i], q.state.Dir, true
+			it := &q.state.Items[i]
+			it.Status, it.Started = Running, time.Now()
+			it.Progress, it.Done, it.Total, it.Speed = 0, 0, 0, 0
+			return ctx, *it, q.state.Dir, true
 		}
 	}
 	q.draining = false
@@ -202,10 +218,11 @@ func (q *Queue) next() (context.Context, Item, string, bool) {
 func (q *Queue) report(id string, u ytdlp.Update) {
 	q.mu.Lock()
 	if i := q.index(id); i >= 0 {
+		it := &q.state.Items[i]
 		if u.Title != "" {
-			q.state.Items[i].Title = u.Title
+			it.Title = u.Title
 		}
-		q.state.Items[i].Progress = u.Fraction
+		it.Progress, it.Done, it.Total, it.Speed = u.Fraction, u.Done, u.Total, u.Speed
 	}
 	q.mu.Unlock()
 	q.onChange()
@@ -227,6 +244,9 @@ func (q *Queue) finish(id, path string, err error) {
 		it.Status, it.Path = Done, path
 		if info, err := os.Stat(path); err == nil {
 			it.Size = info.Size()
+		}
+		if _, err := os.Stat(q.thumbnail(id)); err == nil {
+			it.Thumbnail = q.thumbnail(id)
 		}
 	})
 }
