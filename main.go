@@ -22,13 +22,14 @@ var trayIcon []byte
 // app is read and changed on the main thread. Downloads outlive the panel,
 // so they live in the queue and the panel only shows them.
 type app struct {
-	queue   *downloads.Queue
-	tray    *mygo.Tray
-	panel   *mygo.Window // the open panel, or nil
-	url     string
-	list    ui.ListState
-	swipe   swipeactions.State
-	missing map[string]bool // done downloads whose files are gone, by ID
+	queue      *downloads.Queue
+	tray       *mygo.Tray
+	panel      *mygo.Window // the open panel, or nil
+	url        string
+	list       ui.ListState
+	swipe      swipeactions.State
+	missing    map[string]bool           // done downloads whose files are gone, by ID
+	thumbnails map[string]ui.ImageSource // decoded previews, by path
 }
 
 // logCrashes keeps panics, which no terminal shows for an app opened from
@@ -55,6 +56,9 @@ func logCrashes() {
 
 func (a *app) ready() {
 	logCrashes()
+	if err := registerFonts(); err != nil {
+		log.Fatal(err)
+	}
 	data, err := mygo.App.Path(mygo.PathUserData)
 	if err != nil {
 		log.Fatal(err)
@@ -72,7 +76,7 @@ func (a *app) ready() {
 		log.Fatal(err)
 	}
 	a.tray.OnClick(a.toggle)
-	menu := mygo.NewMenu([]*mygo.MenuItem{{Label: "退出 Vidbar", Role: mygo.RoleQuit}})
+	menu := mygo.NewMenu([]*mygo.MenuItem{{Label: "Quit Vidbar", Role: mygo.RoleQuit}})
 	a.tray.OnRightClick(func() {
 		if a.panel != nil {
 			a.panel.Close()
@@ -110,7 +114,7 @@ func (a *app) toggle() {
 		Focusable: true,
 		Shadow:    true,
 		// Not Popover: on macOS 27 it stayed open through clicks elsewhere and
-		// on the icon.
+		// on the icon, and its material is not the flat surface of the design.
 		CornerRadius: 12,
 		Content:      ui.View(a.view),
 	})
@@ -140,7 +144,7 @@ func (a *app) changed() {
 func (a *app) chooseDir() {
 	// Dialog.Open waits for the user, which must not hold the main thread.
 	go func() {
-		paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{Title: "选择下载目录", Directory: true, DefaultPath: a.queue.Dir()})
+		paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{Title: "Choose Download Folder", Directory: true, DefaultPath: a.queue.Dir()})
 		if err != nil {
 			log.Printf("choose directory: %v", err)
 		}

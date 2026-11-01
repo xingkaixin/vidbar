@@ -13,6 +13,17 @@ import (
 	"github.com/xingkaixin/vidbar/internal/downloads"
 )
 
+func TestProgressShowsElapsedBytesAndSpeed(t *testing.T) {
+	start := time.Unix(1000, 0)
+	running := downloads.Item{Started: start, Done: 12_400_000, Total: 1_200_000_000, Speed: 2_100_000}
+	if got, want := progress(running, start.Add(83*time.Second)), "01:23 · 12.4 MB / 1.2 GB · 2.1 MB/s"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	if got, want := progress(downloads.Item{Started: start}, start), "00:00"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
 // Rows take sideways scrolls for their swipes, which must leave upright ones
 // to the list.
 func TestLongHistoryScrollsOverItsRows(t *testing.T) {
