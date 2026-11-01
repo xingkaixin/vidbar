@@ -109,8 +109,10 @@ func (a *app) toggle() {
 		Height:    460,
 		Focusable: true,
 		Shadow:    true,
-		Popover:   true,
-		Content:   ui.View(a.view),
+		// Not Popover: on macOS 27 it stayed open through clicks elsewhere and
+		// on the icon.
+		CornerRadius: 12,
+		Content:      ui.View(a.view),
 	})
 	a.panel.OnClosed(func() {
 		a.panel = nil
@@ -120,7 +122,7 @@ func (a *app) toggle() {
 
 // changed follows the queue. The icon's title is the only sign of a download
 // while the panel is closed; while it is open the title stays off, because
-// the popover does not follow the icon as a title changes the icon's width.
+// the panel does not follow the icon as a title changes the icon's width.
 func (a *app) changed() {
 	if a.panel != nil {
 		a.panel.Invalidate()

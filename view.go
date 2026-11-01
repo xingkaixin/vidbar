@@ -24,13 +24,10 @@ var (
 	closeIcon = icon("M6.3 6.3l11.4 11.4M17.7 6.3L6.3 17.7")
 )
 
-// secondary stands in for the theme's muted text, which the popover's
-// material makes unreadable over dark windows.
-func secondary(t *ui.Theme) ui.Color { return t.Text.Alpha(0.7) }
+func secondary(t *ui.Theme) ui.Color { return t.TextMuted }
 
 func (a *app) view(c *ui.Context) {
 	t := c.Theme()
-	c.Root().Background(ui.Transparent)
 	c.OnShortcut(ui.Cmd, ui.KeyQ, mygo.App.Quit)
 	items := a.queue.Items()
 	a.list.Key = func(row int) any { return items[row].ID }
