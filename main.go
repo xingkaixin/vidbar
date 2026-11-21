@@ -2,7 +2,9 @@
 package main
 
 import (
+	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -26,6 +28,9 @@ type app struct {
 	tray         *mygo.Tray
 	panel        *mygo.Window // the open panel, or nil
 	panelGen     uint64       // bumped on open and close to drop stale async work
+	quitCtx      context.Context
+	quitCancel   context.CancelFunc
+	keepRunning  func() // holds macOS App Nap off while a download is running
 	url          string
 	list         ui.ListState
 	swipe        swipeactions.State
@@ -69,11 +74,19 @@ func (a *app) ready() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	a.quitCtx, a.quitCancel = context.WithCancel(context.Background())
 	// RunOnMain waits for the main thread, which Close blocks while the
 	// worker that calls this winds down.
 	a.queue = downloads.Open(filepath.Join(data, "history.json"), dir, func() { go mygo.RunOnMain(a.changed) })
+	a.queue.OnFinish(func(it downloads.Item) { go mygo.RunOnMain(func() { a.notifyFinished(it) }) })
 
-	a.tray, err = mygo.NewTray(mygo.TrayOptions{Icon: trayIcon, IconIsTemplate: true, ToolTip: "Vidbar"})
+	a.tray, err = mygo.NewTray(mygo.TrayOptions{
+		ID:              "vidbar",
+		Icon:            trayIcon,
+		IconIsTemplate:  true,
+		MonospacedTitle: true,
+		ToolTip:         "Vidbar",
+	})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -89,6 +102,11 @@ func (a *app) ready() {
 		a.tray.PopUpMenu()
 	})
 	mygo.App.OnWillQuit(func(*mygo.QuitEvent) {
+		a.quitCancel()
+		if a.keepRunning != nil {
+			a.keepRunning()
+			a.keepRunning = nil
+		}
 		a.queue.Close()
 		a.tray.Destroy()
 	})
@@ -152,17 +170,58 @@ func (a *app) checkMissing(gen uint64) {
 // while the panel is closed; while it is open the title stays off, because
 // the panel does not follow the icon as a title changes the icon's width.
 func (a *app) changed() {
+	var running *downloads.Item
+	items := a.queue.Items()
+	for i := range items {
+		if items[i].Status == downloads.Running {
+			running = &items[i]
+		}
+	}
+	if running != nil && a.keepRunning == nil {
+		a.keepRunning = mygo.Power.KeepRunning("Downloading video")
+	} else if running == nil && a.keepRunning != nil {
+		a.keepRunning()
+		a.keepRunning = nil
+	}
 	if a.panel != nil {
 		a.panel.Invalidate()
 		return
 	}
 	title := ""
-	for _, it := range a.queue.Items() {
-		if it.Status == downloads.Running {
-			title = fmt.Sprintf("%d%%", int(it.Progress*100))
-		}
+	if running != nil {
+		title = fmt.Sprintf("%d%%", int(running.Progress*100))
 	}
 	a.tray.SetTitle(title)
+}
+
+func (a *app) notifyFinished(it downloads.Item) {
+	if a.panel != nil {
+		return
+	}
+	var opts mygo.NotificationOptions
+	switch it.Status {
+	case downloads.Done:
+		opts = mygo.NotificationOptions{Title: "Download complete", Body: it.Title, Silent: true}
+	case downloads.Failed:
+		opts = mygo.NotificationOptions{Title: "Download failed", Subtitle: it.Title, Body: it.Error}
+	default:
+		return
+	}
+	n := mygo.NewNotification(opts)
+	n.OnClick(func() {
+		if it.Status == downloads.Done {
+			mygo.Shell.ShowItemInFolder(it.Path)
+			return
+		}
+		if a.panel == nil {
+			a.toggle()
+		}
+	})
+	go func() {
+		if err := n.ShowContext(a.quitCtx); err != nil && !errors.Is(err, mygo.ErrNotificationsDenied) && !errors.Is(err, context.Canceled) {
+			log.Printf("notification: %v", err)
+		}
+	}()
 }
 
 func (a *app) chooseDir() {
