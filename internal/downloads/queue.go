@@ -44,6 +44,7 @@ type Item struct {
 	Done     int64     `json:"-"` // bytes so far
 	Total    int64     `json:"-"` // bytes in all, 0 until known
 	Speed    int64     `json:"-"` // bytes per second, 0 until known
+	Merging  bool      `json:"-"`
 }
 
 // fetchFunc is the shape of ytdlp.Download.
@@ -59,9 +60,11 @@ type Queue struct {
 	path     string
 	fetch    fetchFunc
 	onChange func()
+	onFinish func(Item)
 
 	mu       sync.Mutex
 	state    saved
+	lastID   int64
 	draining bool
 	closed   bool
 	cancel   context.CancelFunc
@@ -87,6 +90,14 @@ func Open(path, defaultDir string, onChange func()) *Queue {
 	return q
 }
 
+// OnFinish sets a callback invoked on the worker goroutine when a download
+// finishes as Done or Failed.
+func (q *Queue) OnFinish(fn func(Item)) {
+	q.mu.Lock()
+	q.onFinish = fn
+	q.mu.Unlock()
+}
+
 // Items returns the history.
 func (q *Queue) Items() []Item {
 	q.mu.Lock()
@@ -109,13 +120,15 @@ func (q *Queue) SetDir(dir string) {
 // Add queues a download of url.
 func (q *Queue) Add(url string) {
 	q.change(func() {
-		id := strconv.FormatInt(time.Now().UnixNano(), 36)
+		now := max(time.Now().UnixNano(), q.lastID+1)
+		q.lastID = now
+		id := strconv.FormatInt(now, 36)
 		q.state.Items = slices.Insert(q.state.Items, 0, Item{ID: id, URL: url, Title: url, Status: Queued, Time: time.Now()})
 		q.startWorker()
 	})
 }
 
-// Retry queues a failed download again, as the newest.
+// Retry queues a failed or missing download again, as the newest.
 func (q *Queue) Retry(id string) {
 	q.change(func() {
 		i := q.index(id)
@@ -123,7 +136,11 @@ func (q *Queue) Retry(id string) {
 			return
 		}
 		it := q.state.Items[i]
-		it.Status, it.Error, it.Time = Queued, "", time.Now()
+		if it.Status == Queued || it.Status == Running {
+			return
+		}
+		it.Status, it.Error, it.Path, it.Size, it.Thumbnail, it.Merging = Queued, "", "", 0, "", false
+		it.Time = time.Now()
 		q.state.Items = slices.Insert(slices.Delete(q.state.Items, i, i+1), 0, it)
 		q.startWorker()
 	})
@@ -191,6 +208,7 @@ func (q *Queue) drain() {
 		if !ok {
 			return
 		}
+		q.onChange()
 		path, err := q.fetch(ctx, it.URL, dir, q.thumbnail(it.ID), func(u ytdlp.Update) { q.report(it.ID, u) })
 		q.finish(it.ID, path, err)
 	}
@@ -206,7 +224,7 @@ func (q *Queue) next() (context.Context, Item, string, bool) {
 			ctx, q.cancel = context.WithCancel(context.Background())
 			it := &q.state.Items[i]
 			it.Status, it.Started = Running, time.Now()
-			it.Progress, it.Done, it.Total, it.Speed = 0, 0, 0, 0
+			it.Progress, it.Done, it.Total, it.Speed, it.Merging = 0, 0, 0, 0, false
 			return ctx, *it, q.state.Dir, true
 		}
 	}
@@ -222,33 +240,46 @@ func (q *Queue) report(id string, u ytdlp.Update) {
 		if u.Title != "" {
 			it.Title = u.Title
 		}
-		it.Progress, it.Done, it.Total, it.Speed = u.Fraction, u.Done, u.Total, u.Speed
+		it.Progress, it.Done, it.Total, it.Speed, it.Merging = u.Fraction, u.Done, u.Total, u.Speed, u.Merging
 	}
 	q.mu.Unlock()
 	q.onChange()
 }
 
 func (q *Queue) finish(id, path string, err error) {
+	var finished Item
+	var notify func(Item)
 	q.change(func() {
 		q.cancel()
 		i := q.index(id)
-		if i < 0 || q.closed {
+		if i < 0 {
+			// The worker may have written a thumbnail right before cancellation.
+			if err := os.Remove(q.thumbnail(id)); err != nil && !os.IsNotExist(err) {
+				log.Printf("remove orphan thumbnail: %v", err)
+			}
+			return
+		}
+		if q.closed {
 			return
 		}
 		it := &q.state.Items[i]
-		it.Time = time.Now()
+		it.Time, it.Merging = time.Now(), false
 		if err != nil {
 			it.Status, it.Error = Failed, err.Error()
-			return
+		} else {
+			it.Status, it.Path = Done, path
+			if info, err := os.Stat(path); err == nil {
+				it.Size = info.Size()
+			}
+			if _, err := os.Stat(q.thumbnail(id)); err == nil {
+				it.Thumbnail = q.thumbnail(id)
+			}
 		}
-		it.Status, it.Path = Done, path
-		if info, err := os.Stat(path); err == nil {
-			it.Size = info.Size()
-		}
-		if _, err := os.Stat(q.thumbnail(id)); err == nil {
-			it.Thumbnail = q.thumbnail(id)
-		}
+		finished, notify = *it, q.onFinish
 	})
+	if notify != nil {
+		notify(finished)
+	}
 }
 
 // save keeps the app running without history: the downloads still work.

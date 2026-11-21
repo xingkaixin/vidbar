@@ -95,6 +95,73 @@ func TestOpenReportsUnfinishedDownloadsAsInterrupted(t *testing.T) {
 	}
 }
 
+func TestStartNotifiesAndCancelCleansOrphanThumbnail(t *testing.T) {
+	started := make(chan string, 1)
+	runningSeen := make(chan struct{}, 1)
+	var q *Queue
+	q = Open(filepath.Join(t.TempDir(), "history.json"), "/videos", func() {
+		for _, it := range q.Items() {
+			if it.Status == Running {
+				select {
+				case runningSeen <- struct{}{}:
+				default:
+				}
+			}
+		}
+	})
+	t.Cleanup(q.Close)
+
+	finished := make(chan Item, 1)
+	q.OnFinish(func(it Item) { finished <- it })
+	q.fetch = func(ctx context.Context, _, _, thumb string, _ func(ytdlp.Update)) (string, error) {
+		started <- thumb
+		<-ctx.Done()
+		_ = os.MkdirAll(filepath.Dir(thumb), 0o755)
+		_ = os.WriteFile(thumb, []byte("jpg"), 0o644)
+		return "", ctx.Err()
+	}
+
+	q.Add("video")
+	thumb := <-started
+	select {
+	case <-runningSeen:
+	case <-time.After(time.Second):
+		t.Fatal("onChange did not observe Running before first progress update")
+	}
+	q.Remove(q.Items()[0].ID)
+	q.Close()
+	if _, err := os.Stat(thumb); !os.IsNotExist(err) {
+		t.Errorf("orphan thumbnail still exists: %v", err)
+	}
+	select {
+	case it := <-finished:
+		t.Errorf("unexpected OnFinish for canceled item: %+v", it)
+	default:
+	}
+}
+
+func TestRetryRequeuesDoneItemAndFiresOnFinish(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "video.mp4")
+	if err := os.WriteFile(file, []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan Item, 2)
+	q := open(t, func(context.Context, string, string, string, func(ytdlp.Update)) (string, error) {
+		return file, nil
+	})
+	q.OnFinish(func(it Item) { done <- it })
+	q.Add("video")
+	first := <-done
+	if first.Status != Done || first.Path != file {
+		t.Fatalf("first %+v", first)
+	}
+	q.Retry(first.ID)
+	second := <-done
+	if second.Status != Done || second.Path != file {
+		t.Fatalf("second %+v", second)
+	}
+}
+
 func waitFor(t *testing.T, q *Queue, status Status) Item {
 	t.Helper()
 	for range 1000 {
