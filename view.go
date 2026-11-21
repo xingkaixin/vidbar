@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -34,8 +35,18 @@ const (
 func (a *app) view(c *ui.Context) {
 	c.SetTheme(theme(c.Theme().Dark))
 	c.OnShortcut(ui.Cmd, ui.KeyQ, mygo.App.Quit)
+	c.OnShortcut(0, ui.KeyEscape, func() {
+		if a.panel != nil {
+			a.panel.Close()
+		}
+	})
+	if a.toast != "" {
+		c.Toast(a.toast)
+		a.toast = ""
+	}
 	items := a.queue.Items()
 	a.list.Key = func(row int) any { return items[row].ID }
+	a.list.MoveAnimation = &ui.Smooth
 	// The elapsed time moves on between yt-dlp's reports, and during a merge
 	// there are none.
 	if slices.ContainsFunc(items, func(it downloads.Item) bool { return it.Status == downloads.Running }) {
@@ -43,13 +54,40 @@ func (a *app) view(c *ui.Context) {
 	}
 
 	ui.Column(c).Fill().Children(func() {
-		input := ui.TextInput(c.Key("url"), &a.url).AutoFocus().Label("Video URL").Placeholder("Paste a video URL, press Enter").Font(fontMono).FontSize(12).Margin(14)
-		if input.Submitted() {
-			if url := strings.TrimSpace(a.url); url != "" {
-				a.queue.Add(url)
+		ui.Column(c).Padding(14).Gap(8).Children(func() {
+			input := ui.TextInput(c.Key("url"), &a.url).AutoFocus().Label("Video URL").Placeholder("Paste a video URL, press Enter").Font(fontMono).FontSize(12).OnPaste(func(text string) bool {
+				urls := extractURLs(text)
+				if len(urls) <= 1 {
+					return false
+				}
+				a.enqueue(urls)
+				a.dismissedClip = strings.TrimSpace(text)
+				a.clipURLs = nil
+				a.toast = fmt.Sprintf("Added %d downloads", len(urls))
+				return true
+			})
+			if input.Submitted() {
+				a.submitInput(c)
 			}
-			a.url = ""
-		}
+			if len(a.clipURLs) > 0 && a.url == "" {
+				ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
+					meta(c, clipLabel(a.clipURLs)).SingleLine().Grow(1).Shrink(1)
+					if ui.Button(c, "ADD").Label("Add clipboard URL").Font(fontMono).FontSize(11).LetterSpacing(0.88).TextColor(c.Theme().Accent).Clicked() {
+						urls := a.clipURLs
+						a.dismissedClip = a.clipRaw
+						a.clipURLs = nil
+						a.enqueue(urls)
+						if len(urls) > 1 {
+							c.Toast(fmt.Sprintf("Added %d downloads", len(urls)))
+						}
+					}
+					if ui.Button(c, "×").Label("Dismiss clipboard URL").Font(fontMono).FontSize(12).Clicked() {
+						a.dismissedClip = a.clipRaw
+						a.clipURLs = nil
+					}
+				})
+			}
+		})
 		ui.Divider(c)
 		ui.List(c, &a.list, len(items), func(i int) { a.row(c, items[i]) }).Grow(1).Label("Downloads").Children(func() {
 			if len(items) == 0 {
@@ -58,7 +96,12 @@ func (a *app) view(c *ui.Context) {
 		})
 		ui.Divider(c)
 		ui.Row(c).Gap(8).Padding(8, 14).AlignItems(ui.Center).Children(func() {
-			meta(c, shortPath(a.queue.Dir())).Grow(1).SingleLine()
+			dirPath := meta(c, shortPath(a.queue.Dir())).Grow(1).Shrink(1).SingleLine().TruncateStart().Cursor(ui.CursorPointer).Label("Open download folder")
+			if dirPath.Clicked() {
+				if err := mygo.Shell.OpenPath(a.queue.Dir()); err != nil {
+					c.Toast("Could not open folder")
+				}
+			}
 			if ui.Button(c, "CHANGE").Label("Change download folder").Font(fontMono).FontSize(11).LetterSpacing(0.88).Clicked() {
 				a.chooseDir()
 			}
@@ -75,18 +118,23 @@ func (a *app) row(c *ui.Context, it downloads.Item) {
 	t := c.Theme()
 	remove := swipeactions.Action{Label: "Delete", Icon: trashIcon, Color: t.Danger}
 	retry := swipeactions.Action{Label: "Retry", Icon: retryIcon, Color: t.Accent}
+	missing := a.missing[it.ID]
 	var actions []swipeactions.Action
-	switch it.Status {
-	case downloads.Queued, downloads.Running:
+	switch {
+	case it.Status == downloads.Queued || it.Status == downloads.Running:
 		actions = []swipeactions.Action{{Label: "Cancel", Icon: closeIcon, Color: t.Danger}}
-	case downloads.Failed:
+	case it.Status == downloads.Failed || missing:
 		actions = []swipeactions.Action{remove, retry}
 	default:
 		actions = []swipeactions.Action{remove}
 	}
 
 	ev := swipeactions.Row(c.Key(it.ID), &a.swipe, nil, actions, func() {
-		ui.Row(c).Gap(10).Padding(10, 14).AlignItems(ui.Center).Children(func() {
+		row := ui.Row(c).Gap(10).Padding(10, 14).AlignItems(ui.Center)
+		row.PopoverMenu(func(m *ui.Menu) {
+			a.rowMenu(c, m, it, missing)
+		})
+		row.Children(func() {
 			a.preview(c, it)
 			ui.Column(c).Gap(5).Grow(1).Shrink(1).Children(func() {
 				ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
@@ -117,14 +165,60 @@ func (a *app) row(c *ui.Context, it downloads.Item) {
 
 	if action, ok := ev.Chosen(); ok {
 		if action == retry {
-			a.queue.Retry(it.ID)
+			a.retry(it)
 		} else {
 			a.remove(c, it)
 		}
 	}
-	if ev.Clicked() && it.Status == downloads.Done && !a.missing[it.ID] {
+	if ev.Clicked() && it.Status == downloads.Done && !missing {
 		mygo.Clipboard.WriteText(it.Path)
 		c.Toast("Path copied")
+	}
+}
+
+func (a *app) rowMenu(c *ui.Context, m *ui.Menu, it downloads.Item, missing bool) {
+	switch {
+	case it.Status == downloads.Done && !missing:
+		if m.Item("Show in Finder").Chosen() {
+			mygo.Shell.ShowItemInFolder(it.Path)
+		}
+		if m.Item("Quick Look").Chosen() {
+			if err := mygo.Shell.PreviewItem(it.Path); err != nil {
+				c.Toast("Could not preview file")
+			}
+		}
+		if m.Item("Copy URL").Chosen() {
+			mygo.Clipboard.WriteText(it.URL)
+			c.Toast("URL copied")
+		}
+		m.Separator()
+		if m.Item("Remove from List").Chosen() {
+			a.forget(it)
+		}
+		if m.Item("Delete File").Chosen() {
+			a.remove(c, it)
+		}
+	case it.Status == downloads.Failed || missing:
+		if m.Item("Retry").Chosen() {
+			a.retry(it)
+		}
+		if m.Item("Copy URL").Chosen() {
+			mygo.Clipboard.WriteText(it.URL)
+			c.Toast("URL copied")
+		}
+		m.Separator()
+		if m.Item("Remove from List").Chosen() {
+			a.forget(it)
+		}
+	default:
+		if m.Item("Copy URL").Chosen() {
+			mygo.Clipboard.WriteText(it.URL)
+			c.Toast("URL copied")
+		}
+		m.Separator()
+		if m.Item("Cancel").Chosen() {
+			a.forget(it)
+		}
 	}
 }
 
@@ -199,9 +293,13 @@ func segbar(c *ui.Context, value float64) {
 	})
 }
 
-// progress is the state of a running download: elapsed, bytes and speed.
+// progress is the state of a running download: elapsed, bytes and speed, or
+// the merge phase once streams finish.
 func progress(it downloads.Item, now time.Time) string {
 	parts := []string{elapsed(now.Sub(it.Started))}
+	if it.Merging {
+		return parts[0] + " · MERGING"
+	}
 	if it.Done > 0 {
 		bytes := size(it.Done)
 		if it.Total > 0 {
@@ -258,10 +356,101 @@ func (a *app) remove(c *ui.Context, it downloads.Item) {
 			return
 		}
 	}
+	a.forget(it)
+}
+
+func (a *app) forget(it downloads.Item) {
 	delete(a.missing, it.ID)
 	delete(a.thumbnails, it.Thumbnail)
 	delete(a.thumbLoading, it.Thumbnail)
 	a.queue.Remove(it.ID)
+}
+
+func (a *app) retry(it downloads.Item) {
+	delete(a.missing, it.ID)
+	delete(a.thumbnails, it.Thumbnail)
+	delete(a.thumbLoading, it.Thumbnail)
+	a.queue.Retry(it.ID)
+}
+
+func (a *app) submitInput(c *ui.Context) {
+	raw := strings.TrimSpace(a.url)
+	a.url = ""
+	if raw == "" {
+		return
+	}
+	if urls := extractURLs(raw); len(urls) > 0 {
+		a.enqueue(urls)
+		if len(urls) > 1 {
+			c.Toast(fmt.Sprintf("Added %d downloads", len(urls)))
+		}
+		return
+	}
+	if strings.ContainsAny(raw, "\r\n") {
+		c.Toast("No valid URLs")
+		return
+	}
+	a.queue.Add(raw)
+}
+
+func (a *app) enqueue(urls []string) {
+	for _, u := range urls {
+		a.queue.Add(u)
+	}
+}
+
+func (a *app) clipboardURLs(raw string) []string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == a.dismissedClip {
+		return nil
+	}
+	urls := extractURLs(trimmed)
+	if len(urls) == 0 {
+		return nil
+	}
+	active := map[string]bool{}
+	for _, it := range a.queue.Items() {
+		if it.Status == downloads.Queued || it.Status == downloads.Running {
+			active[it.URL] = true
+		}
+	}
+	var out []string
+	for _, u := range urls {
+		if !active[u] {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
+func extractURLs(text string) []string {
+	fields := strings.Fields(text)
+	if len(fields) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(fields))
+	urls := make([]string, 0, len(fields))
+	for _, f := range fields {
+		u, err := url.Parse(f)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return nil
+		}
+		if !seen[f] {
+			seen[f] = true
+			urls = append(urls, f)
+		}
+	}
+	return urls
+}
+
+func clipLabel(urls []string) string {
+	if len(urls) > 1 {
+		return fmt.Sprintf("%d URLS IN CLIPBOARD", len(urls))
+	}
+	s := urls[0]
+	s = strings.TrimPrefix(s, "https://")
+	s = strings.TrimPrefix(s, "http://")
+	return s
 }
 
 func relativeTime(t, now time.Time) string {

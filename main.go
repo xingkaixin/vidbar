@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
@@ -31,12 +32,16 @@ type app struct {
 	quitCtx      context.Context
 	quitCancel   context.CancelFunc
 	keepRunning  func() // holds macOS App Nap off while a download is running
-	url          string
-	list         ui.ListState
-	swipe        swipeactions.State
-	missing      map[string]bool           // done downloads whose files are gone, by ID
-	thumbnails   map[string]ui.ImageSource // decoded previews, by path
-	thumbLoading map[string]bool           // previews currently decoding off-thread
+	url           string
+	toast         string
+	clipRaw       string   // raw clipboard text corresponding to clipURLs
+	clipURLs      []string // valid http(s) URLs detected on panel open
+	dismissedClip string   // clipboard text already acted on or dismissed
+	list          ui.ListState
+	swipe         swipeactions.State
+	missing       map[string]bool           // done downloads whose files are gone, by ID
+	thumbnails    map[string]ui.ImageSource // decoded previews, by path
+	thumbLoading  map[string]bool           // previews currently decoding off-thread
 }
 
 // logCrashes keeps panics, which no terminal shows for an app opened from
@@ -123,6 +128,7 @@ func (a *app) toggle() {
 	gen := a.panelGen
 	a.missing = map[string]bool{}
 	a.checkMissing(gen)
+	a.detectClipboard()
 	a.tray.SetTitle("")
 	a.panel = mygo.NewFlyout(mygo.FlyoutOptions{
 		Tray:      a.tray,
@@ -139,10 +145,23 @@ func (a *app) toggle() {
 	a.panel.OnClosed(func() {
 		a.panel = nil
 		a.panelGen++
+		a.clipURLs = nil
 		a.thumbnails = nil
 		a.thumbLoading = nil
 		a.changed()
 	})
+}
+
+func (a *app) detectClipboard() {
+	a.clipURLs = nil
+	a.clipRaw = ""
+	raw := mygo.Clipboard.ReadText()
+	urls := a.clipboardURLs(raw)
+	if len(urls) == 0 {
+		return
+	}
+	a.clipRaw = strings.TrimSpace(raw)
+	a.clipURLs = urls
 }
 
 func (a *app) checkMissing(gen uint64) {
