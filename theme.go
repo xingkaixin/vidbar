@@ -52,6 +52,7 @@ func nullframe(t *ui.Theme, surface, raised, border, visible, text, muted, succe
 	t.Text = ui.Hex(text)
 	t.TextMuted = ui.Hex(muted)
 	t.Accent = orange
+	t.InactiveAccent = orange
 	t.AccentHover = orange.Mix(ui.Hex(text), 0.15)
 	t.AccentPressed = orange.Mix(ui.Hex(surface), 0.15)
 	t.AccentText = ui.Hex("#ffffff")
