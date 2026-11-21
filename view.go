@@ -137,7 +137,8 @@ func (a *app) preview(c *ui.Context, it downloads.Item) {
 	ui.Box(c).Size(64, 36).Shrink(0).Background(c.Theme().Surface)
 }
 
-// thumbnail decodes a preview once: the view runs on every frame.
+// thumbnail decodes a preview off the main thread so scrolling and opening
+// the panel never block on disk I/O or JPEG decoding.
 func (a *app) thumbnail(path string) ui.ImageSource {
 	if path == "" {
 		return nil
@@ -145,19 +146,36 @@ func (a *app) thumbnail(path string) ui.ImageSource {
 	if img, ok := a.thumbnails[path]; ok {
 		return img
 	}
-	var img ui.ImageSource
-	data, err := os.ReadFile(path)
-	if err == nil {
-		img, err = ui.DecodeImage(data)
+	if a.panel == nil || a.thumbLoading[path] {
+		return nil
 	}
-	if err != nil {
-		log.Printf("thumbnail: %v", err)
+	if a.thumbLoading == nil {
+		a.thumbLoading = map[string]bool{}
 	}
-	if a.thumbnails == nil {
-		a.thumbnails = map[string]ui.ImageSource{}
-	}
-	a.thumbnails[path] = img
-	return img
+	a.thumbLoading[path] = true
+	gen := a.panelGen
+	go func() {
+		var img ui.ImageSource
+		data, err := os.ReadFile(path)
+		if err == nil {
+			img, err = ui.DecodeImage(data)
+		}
+		if err != nil {
+			log.Printf("thumbnail: %v", err)
+		}
+		mygo.RunOnMain(func() {
+			if a.panel == nil || a.panelGen != gen {
+				return
+			}
+			delete(a.thumbLoading, path)
+			if a.thumbnails == nil {
+				a.thumbnails = map[string]ui.ImageSource{}
+			}
+			a.thumbnails[path] = img
+			a.panel.Invalidate()
+		})
+	}()
+	return nil
 }
 
 func led(c *ui.Context, color ui.Color) {
@@ -240,7 +258,9 @@ func (a *app) remove(c *ui.Context, it downloads.Item) {
 			return
 		}
 	}
+	delete(a.missing, it.ID)
 	delete(a.thumbnails, it.Thumbnail)
+	delete(a.thumbLoading, it.Thumbnail)
 	a.queue.Remove(it.ID)
 }
 

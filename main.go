@@ -22,14 +22,16 @@ var trayIcon []byte
 // app is read and changed on the main thread. Downloads outlive the panel,
 // so they live in the queue and the panel only shows them.
 type app struct {
-	queue      *downloads.Queue
-	tray       *mygo.Tray
-	panel      *mygo.Window // the open panel, or nil
-	url        string
-	list       ui.ListState
-	swipe      swipeactions.State
-	missing    map[string]bool           // done downloads whose files are gone, by ID
-	thumbnails map[string]ui.ImageSource // decoded previews, by path
+	queue        *downloads.Queue
+	tray         *mygo.Tray
+	panel        *mygo.Window // the open panel, or nil
+	panelGen     uint64       // bumped on open and close to drop stale async work
+	url          string
+	list         ui.ListState
+	swipe        swipeactions.State
+	missing      map[string]bool           // done downloads whose files are gone, by ID
+	thumbnails   map[string]ui.ImageSource // decoded previews, by path
+	thumbLoading map[string]bool           // previews currently decoding off-thread
 }
 
 // logCrashes keeps panics, which no terminal shows for an app opened from
@@ -99,12 +101,10 @@ func (a *app) toggle() {
 		a.panel.Close()
 		return
 	}
+	a.panelGen++
+	gen := a.panelGen
 	a.missing = map[string]bool{}
-	for _, it := range a.queue.Items() {
-		if _, err := os.Stat(it.Path); it.Status == downloads.Done && err != nil {
-			a.missing[it.ID] = true
-		}
-	}
+	a.checkMissing(gen)
 	a.tray.SetTitle("")
 	a.panel = mygo.NewFlyout(mygo.FlyoutOptions{
 		Tray:      a.tray,
@@ -120,8 +120,32 @@ func (a *app) toggle() {
 	})
 	a.panel.OnClosed(func() {
 		a.panel = nil
+		a.panelGen++
+		a.thumbnails = nil
+		a.thumbLoading = nil
 		a.changed()
 	})
+}
+
+func (a *app) checkMissing(gen uint64) {
+	items := a.queue.Items()
+	go func() {
+		missing := map[string]bool{}
+		for _, it := range items {
+			if it.Status == downloads.Done {
+				if _, err := os.Stat(it.Path); err != nil {
+					missing[it.ID] = true
+				}
+			}
+		}
+		mygo.RunOnMain(func() {
+			if a.panel == nil || a.panelGen != gen {
+				return
+			}
+			a.missing = missing
+			a.panel.Invalidate()
+		})
+	}()
 }
 
 // changed follows the queue. The icon's title is the only sign of a download
