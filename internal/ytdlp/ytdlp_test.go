@@ -52,3 +52,29 @@ func TestFailurePrefersTheLastYtDlpError(t *testing.T) {
 		t.Errorf("got %q", got)
 	}
 }
+
+func TestReadReportsMergingAndHandlesLongLines(t *testing.T) {
+	longNoise := strings.Repeat("x", 100*1024)
+	output := longNoise + "\n" +
+		`{"title":"Clip","formats":"299+258","size":200}` + "\n" +
+		`{"format":"299","done":200,"total":200,"speed":50}` + "\n" +
+		`{"postprocess":"started"}` + "\n" +
+		`{"path":"/videos/clip.mp4"}` + "\n"
+	var last Update
+	path := read(strings.NewReader(output), func(u Update) { last = u })
+	if path != "/videos/clip.mp4" {
+		t.Fatalf("path %q", path)
+	}
+	if !last.Merging || last.Fraction != 1 || last.Speed != 0 {
+		t.Errorf("last update %+v", last)
+	}
+}
+
+func TestTailBufferKeepsNewestBytes(t *testing.T) {
+	b := &tailBuffer{max: 10}
+	_, _ = b.Write([]byte("123456"))
+	_, _ = b.Write([]byte("7890abcd"))
+	if got := b.String(); got != "567890abcd" {
+		t.Errorf("got %q", got)
+	}
+}
